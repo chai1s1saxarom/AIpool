@@ -1,0 +1,554 @@
+openapi: 3.1.0
+info:
+  title: LLM Processing Service
+  description: |
+    Сервис обработки запросов к LLM провайдерам.
+    
+    Сервис отвечает за:
+    - Взаимодействие с внешними LLM API (OpenAI, Google Gemini, и др.)
+    - Асинхронную обработку запросов через RabbitMQ
+    - Подсчёт использованных токенов и стоимости
+    - Отправку метрик в Cost Accounting Service
+    
+    **Технологии:** FastAPI, RabbitMQ, PostgreSQL, LangChain
+  version: 1.0.0
+  contact:
+    name: API Support
+    email: support@example.com
+
+servers:
+  - url: http://localhost:8001
+    description: Local development server
+  - url: http://llm-processing:8001
+    description: Docker/Kubernetes internal
+
+tags:
+  - name: llm
+    description: Обработка LLM запросов
+  - name: models
+    description: Информация о доступных моделях
+  - name: health
+    description: Проверка состояния сервиса
+
+paths:
+  /v1/llm/jobs:
+    get:
+      tags:
+        - llm
+      summary: Получить список LLM задач
+      description: Возвращает список задач LLM обработки с фильтрацией
+      operationId: listLLMJobs
+      parameters:
+        - name: user_request_id
+          in: query
+          required: false
+          description: Фильтр по UUID запроса пользователя
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          required: false
+          description: Фильтр по статусу
+          schema:
+            type: string
+            enum: [pending, processing, done, failed]
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+      responses:
+        '200':
+          description: Список задач
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LLMJobListResponse'
+
+    post:
+      tags:
+        - llm
+      summary: Создать LLM задачу
+      description: |
+        Создаёт новую задачу для обработки LLM.
+        
+        Задача ставится в очередь RabbitMQ и обрабатывается асинхронно.
+        Результат будет отправлен через webhook или в очередь ответов.
+      operationId: createLLMJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLLMJobRequest'
+      responses:
+        '202':
+          description: Задача принята в обработку
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LLMJobCreatedResponse'
+        '400':
+          description: Некорректные данные запроса
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Неизвестная модель
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/llm/jobs/{job_id}:
+    get:
+      tags:
+        - llm
+      summary: Получить информацию о задаче
+      description: Возвращает детальную информацию о конкретной LLM задаче
+      operationId: getLLMJob
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: UUID задачи
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Информация о задаче
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LLMJobResponse'
+        '404':
+          description: Задача не найдена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      tags:
+        - llm
+      summary: Отменить задачу
+      description: Отменяет задачу, если она ещё не завершена
+      operationId: cancelLLMJob
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: UUID задачи
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Задача отменена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LLMJobResponse'
+        '404':
+          description: Задача не найдена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Задача уже завершена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/llm/trace/{user_request_id}:
+    get:
+      tags:
+        - llm
+      summary: Получить трейс запросов
+      description: Возвращает трейс всех LLM вызовов для указанного user_request_id
+      operationId: getLLMTrace
+      parameters:
+        - name: user_request_id
+          in: path
+          required: true
+          description: UUID запроса пользователя
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Трейс запросов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LLMTraceResponse'
+        '404':
+          description: Трейс не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/models:
+    get:
+      tags:
+        - models
+      summary: Получить список доступных моделей
+      description: Возвращает список всех поддерживаемых LLM моделей с их параметрами
+      operationId: listModels
+      responses:
+        '200':
+          description: Список моделей
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelListResponse'
+
+  /v1/models/{model_id}:
+    get:
+      tags:
+        - models
+      summary: Получить информацию о модели
+      description: Возвращает детальную информацию о конкретной модели
+      operationId: getModel
+      parameters:
+        - name: model_id
+          in: path
+          required: true
+          description: ID модели
+          schema:
+            type: string
+          example: "openai_gpt-4o-mini"
+      responses:
+        '200':
+          description: Информация о модели
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelInfo'
+        '404':
+          description: Модель не найдена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/health/liveness:
+    get:
+      tags:
+        - health
+      summary: Проверка живости сервиса
+      operationId: healthLiveness
+      responses:
+        '200':
+          description: Сервис работает
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /v1/health/readiness:
+    get:
+      tags:
+        - health
+      summary: Проверка готовности сервиса
+      operationId: healthReadiness
+      responses:
+        '200':
+          description: Сервис готов к работе
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Сервис не готов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+components:
+  schemas:
+    CreateLLMJobRequest:
+      type: object
+      required:
+        - messages
+        - user_request_id
+        - llm_model_id
+        - consumer_service_id
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/LLMMessage'
+          minItems: 1
+          description: Список сообщений для LLM
+        user_request_id:
+          type: string
+          format: uuid
+          description: UUID запроса пользователя (для трейсинга)
+        llm_model_id:
+          type: string
+          description: ID модели для обработки
+          example: "openai_gpt-4o-mini"
+        consumer_service_id:
+          type: string
+          description: ID сервиса-потребителя
+          example: "api-router"
+        webhook_url:
+          type: string
+          format: uri
+          nullable: true
+          description: URL для отправки результата (опционально)
+        timeout:
+          type: integer
+          default: 120
+          minimum: 10
+          maximum: 600
+          description: Таймаут в секундах
+        temperature:
+          type: number
+          default: 0.7
+          minimum: 0
+          maximum: 2
+          description: Температура генерации
+        max_tokens:
+          type: integer
+          default: 4000
+          minimum: 1
+          maximum: 128000
+          description: Максимальное количество токенов ответа
+        structured_output:
+          type: boolean
+          default: false
+          description: Ожидать JSON ответ
+
+    LLMMessage:
+      type: object
+      required:
+        - role
+        - content
+      properties:
+        role:
+          type: string
+          enum: [system, user, assistant]
+          description: Роль автора сообщения
+        content:
+          type: string
+          minLength: 1
+          description: Содержимое сообщения
+
+    LLMJobCreatedResponse:
+      type: object
+      required:
+        - job_id
+        - status
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        user_request_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [accepted]
+        message:
+          type: string
+          example: "Задача принята в обработку"
+
+    LLMJobResponse:
+      type: object
+      required:
+        - job_id
+        - user_request_id
+        - status
+        - created_at
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        user_request_id:
+          type: string
+          format: uuid
+        llm_model_id:
+          type: string
+        consumer_service_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, processing, done, failed, cancelled]
+        result:
+          $ref: '#/components/schemas/LLMResult'
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+        processing_time_ms:
+          type: integer
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    LLMJobListResponse:
+      type: object
+      required:
+        - items
+        - total
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/LLMJobResponse'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    LLMResult:
+      type: object
+      required:
+        - response
+        - input_tokens
+        - output_tokens
+        - total_cost_usd
+      properties:
+        response:
+          type: string
+          description: Ответ от LLM
+        input_tokens:
+          type: integer
+          description: Количество входных токенов
+        output_tokens:
+          type: integer
+          description: Количество выходных токенов
+        total_cost_usd:
+          type: number
+          format: float
+          description: Общая стоимость запроса в USD
+
+    LLMTraceResponse:
+      type: object
+      required:
+        - user_request_id
+        - jobs
+      properties:
+        user_request_id:
+          type: string
+          format: uuid
+        jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/LLMJobResponse'
+        total_cost_usd:
+          type: number
+          format: float
+        total_input_tokens:
+          type: integer
+        total_output_tokens:
+          type: integer
+
+    ModelInfo:
+      type: object
+      required:
+        - model_id
+        - provider
+        - display_name
+      properties:
+        model_id:
+          type: string
+          example: "openai_gpt-4o-mini"
+        provider:
+          type: string
+          enum: [openai, google, anthropic, yandex]
+        display_name:
+          type: string
+          example: "GPT-4o Mini"
+        description:
+          type: string
+        max_context_tokens:
+          type: integer
+          example: 128000
+        max_output_tokens:
+          type: integer
+          example: 16000
+        input_price_per_million:
+          type: number
+          format: float
+          description: Цена за 1M входных токенов в USD
+          example: 0.15
+        output_price_per_million:
+          type: number
+          format: float
+          description: Цена за 1M выходных токенов в USD
+          example: 0.60
+        supports_structured_output:
+          type: boolean
+          default: true
+
+    ModelListResponse:
+      type: object
+      required:
+        - models
+      properties:
+        models:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelInfo'
+
+    HealthResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum: [healthy, unhealthy]
+        details:
+          type: object
+          properties:
+            database:
+              type: string
+              enum: [ok, error]
+            rabbitmq:
+              type: string
+              enum: [ok, error]
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          description: Код ошибки
+          example: "NOT_FOUND"
+        message:
+          type: string
+          description: Описание ошибки
+        details:
+          type: object
+          additionalProperties: true

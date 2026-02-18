@@ -1,0 +1,650 @@
+openapi: 3.1.0
+info:
+  title: Cost Accounting Service
+  description: |
+    Сервис учёта затрат на использование AI-сервисов.
+    
+    Сервис отвечает за:
+    - Запись затрат на использование LLM и генерации изображений
+    - Автоматический расчёт стоимости по токенам
+    - Агрегацию затрат по пользователям и запросам
+    - Получение актуальных курсов валют
+    
+    **Технологии:** FastAPI, PostgreSQL, aiohttp
+  version: 1.0.0
+  contact:
+    name: API Support
+    email: support@example.com
+
+servers:
+  - url: http://localhost:8003
+    description: Local development server
+  - url: http://cost-accounting:8003
+    description: Docker/Kubernetes internal
+
+tags:
+  - name: costs
+    description: Учёт затрат
+  - name: statistics
+    description: Статистика и агрегация
+  - name: exchange-rates
+    description: Курсы валют
+  - name: health
+    description: Проверка состояния сервиса
+
+paths:
+  /v1/costs:
+    get:
+      tags:
+        - costs
+      summary: Получить список записей о затратах
+      description: Возвращает список записей с фильтрацией и пагинацией
+      operationId: listCosts
+      parameters:
+        - name: user_request_id
+          in: query
+          required: false
+          description: Фильтр по UUID запроса пользователя
+          schema:
+            type: string
+            format: uuid
+        - name: service_name
+          in: query
+          required: false
+          description: Фильтр по имени сервиса
+          schema:
+            type: string
+        - name: date_from
+          in: query
+          required: false
+          description: Начальная дата периода
+          schema:
+            type: string
+            format: date
+        - name: date_to
+          in: query
+          required: false
+          description: Конечная дата периода
+          schema:
+            type: string
+            format: date
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+      responses:
+        '200':
+          description: Список записей о затратах
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CostRecordListResponse'
+
+    post:
+      tags:
+        - costs
+      summary: Создать запись о затратах (ручной ввод)
+      description: |
+        Создаёт запись о затратах с указанием суммы вручную.
+        
+        Автоматически конвертирует сумму в другие валюты по актуальному курсу.
+      operationId: createCostRecord
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCostRecordRequest'
+      responses:
+        '201':
+          description: Запись создана
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CostRecordResponse'
+        '400':
+          description: Некорректные данные запроса
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v2/costs:
+    post:
+      tags:
+        - costs
+      summary: Создать запись о затратах (по токенам)
+      description: |
+        Создаёт запись о затратах с автоматическим расчётом стоимости.
+        
+        Стоимость рассчитывается по формуле:
+        `(input_tokens * input_price) + (output_tokens * output_price)`
+        
+        Цены берутся из справочника по `model_id`.
+      operationId: createCostRecordV2
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCostRecordV2Request'
+      responses:
+        '201':
+          description: Запись создана
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CostRecordResponse'
+        '400':
+          description: Некорректные данные запроса
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Неизвестная модель
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/costs/{cost_id}:
+    get:
+      tags:
+        - costs
+      summary: Получить запись о затратах
+      description: Возвращает детальную информацию о конкретной записи
+      operationId: getCostRecord
+      parameters:
+        - name: cost_id
+          in: path
+          required: true
+          description: UUID записи
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Информация о записи
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CostRecordResponse'
+        '404':
+          description: Запись не найдена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      tags:
+        - costs
+      summary: Удалить запись о затратах
+      description: Удаляет запись о затратах
+      operationId: deleteCostRecord
+      parameters:
+        - name: cost_id
+          in: path
+          required: true
+          description: UUID записи
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Запись удалена
+        '404':
+          description: Запись не найдена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/costs/user-request/{user_request_id}:
+    get:
+      tags:
+        - statistics
+      summary: Получить затраты по запросу пользователя
+      description: Возвращает агрегированные затраты по всем job'ам для указанного user_request_id
+      operationId: getUserRequestCost
+      parameters:
+        - name: user_request_id
+          in: path
+          required: true
+          description: UUID запроса пользователя
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Агрегированные затраты
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserRequestCostResponse'
+        '404':
+          description: Записи не найдены
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/statistics/summary:
+    get:
+      tags:
+        - statistics
+      summary: Получить сводную статистику
+      description: Возвращает сводную статистику затрат за период
+      operationId: getCostsSummary
+      parameters:
+        - name: date_from
+          in: query
+          required: true
+          description: Начальная дата периода
+          schema:
+            type: string
+            format: date
+        - name: date_to
+          in: query
+          required: true
+          description: Конечная дата периода
+          schema:
+            type: string
+            format: date
+        - name: group_by
+          in: query
+          required: false
+          description: Группировка результатов
+          schema:
+            type: string
+            enum: [day, week, month, service]
+            default: day
+      responses:
+        '200':
+          description: Сводная статистика
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CostsSummaryResponse'
+        '400':
+          description: Некорректные параметры
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/exchange-rates:
+    get:
+      tags:
+        - exchange-rates
+      summary: Получить курсы валют
+      description: Возвращает актуальные курсы валют (USD/RUB, EUR/RUB)
+      operationId: getExchangeRates
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Количество последних записей
+          schema:
+            type: integer
+            default: 7
+            minimum: 1
+            maximum: 30
+      responses:
+        '200':
+          description: Курсы валют
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExchangeRatesResponse'
+
+  /v1/exchange-rates/{date}:
+    get:
+      tags:
+        - exchange-rates
+      summary: Получить курс на дату
+      description: Возвращает курсы валют на указанную дату
+      operationId: getExchangeRateByDate
+      parameters:
+        - name: date
+          in: path
+          required: true
+          description: Дата в формате YYYY-MM-DD
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Курсы валют
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExchangeRateResponse'
+        '404':
+          description: Курс на дату не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/health/liveness:
+    get:
+      tags:
+        - health
+      summary: Проверка живости сервиса
+      operationId: healthLiveness
+      responses:
+        '200':
+          description: Сервис работает
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /v1/health/readiness:
+    get:
+      tags:
+        - health
+      summary: Проверка готовности сервиса
+      operationId: healthReadiness
+      responses:
+        '200':
+          description: Сервис готов к работе
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Сервис не готов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+components:
+  schemas:
+    CreateCostRecordRequest:
+      type: object
+      required:
+        - service_name
+        - user_request_id
+        - currency
+        - amount
+      properties:
+        service_name:
+          type: string
+          description: Название сервиса
+          example: "llm-processing"
+        user_request_id:
+          type: string
+          format: uuid
+          description: UUID запроса пользователя
+        job_id:
+          type: string
+          nullable: true
+          description: ID задачи (опционально)
+        currency:
+          type: string
+          enum: [USD, RUB, EUR]
+          description: Валюта суммы
+        amount:
+          type: number
+          format: float
+          minimum: 0
+          description: Сумма затрат
+
+    CreateCostRecordV2Request:
+      type: object
+      required:
+        - service_name
+        - user_request_id
+        - model_id
+        - prompt_tokens
+        - completion_tokens
+      properties:
+        service_name:
+          type: string
+          description: Название сервиса
+          example: "llm-processing"
+        user_request_id:
+          type: string
+          format: uuid
+          description: UUID запроса пользователя
+        job_id:
+          type: string
+          nullable: true
+          description: ID задачи (опционально)
+        model_id:
+          type: string
+          description: ID модели для расчёта стоимости
+          example: "openai_gpt-4o-mini"
+        prompt_tokens:
+          type: integer
+          minimum: 0
+          description: Количество входных токенов
+        completion_tokens:
+          type: integer
+          minimum: 0
+          description: Количество выходных токенов
+
+    CostRecordResponse:
+      type: object
+      required:
+        - id
+        - service_name
+        - user_request_id
+        - rub_amount
+        - usd_amount
+        - eur_amount
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        service_name:
+          type: string
+        user_request_id:
+          type: string
+          format: uuid
+        job_id:
+          type: string
+          nullable: true
+        currency:
+          type: string
+          enum: [USD, RUB, EUR]
+          description: Исходная валюта
+        rub_amount:
+          type: number
+          format: float
+        usd_amount:
+          type: number
+          format: float
+        eur_amount:
+          type: number
+          format: float
+        usd_rate:
+          type: number
+          format: float
+          description: Курс USD/RUB на момент создания
+        eur_rate:
+          type: number
+          format: float
+          description: Курс EUR/RUB на момент создания
+        created_at:
+          type: string
+          format: date-time
+
+    CostRecordListResponse:
+      type: object
+      required:
+        - items
+        - total
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/CostRecordResponse'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    UserRequestCostResponse:
+      type: object
+      required:
+        - user_request_id
+        - total_rub
+        - total_usd
+        - total_eur
+        - records_count
+      properties:
+        user_request_id:
+          type: string
+          format: uuid
+        total_rub:
+          type: number
+          format: float
+          description: Общая сумма в рублях
+        total_usd:
+          type: number
+          format: float
+          description: Общая сумма в долларах
+        total_eur:
+          type: number
+          format: float
+          description: Общая сумма в евро
+        records_count:
+          type: integer
+          description: Количество записей
+
+    CostsSummaryResponse:
+      type: object
+      required:
+        - period
+        - total
+        - breakdown
+      properties:
+        period:
+          type: object
+          properties:
+            date_from:
+              type: string
+              format: date
+            date_to:
+              type: string
+              format: date
+        total:
+          type: object
+          properties:
+            rub:
+              type: number
+              format: float
+            usd:
+              type: number
+              format: float
+            eur:
+              type: number
+              format: float
+            records_count:
+              type: integer
+        breakdown:
+          type: array
+          items:
+            type: object
+            properties:
+              group_key:
+                type: string
+                description: Ключ группировки (дата/сервис)
+              rub:
+                type: number
+                format: float
+              usd:
+                type: number
+                format: float
+              eur:
+                type: number
+                format: float
+              records_count:
+                type: integer
+
+    ExchangeRateResponse:
+      type: object
+      required:
+        - date
+        - usd_rub
+        - eur_rub
+      properties:
+        date:
+          type: string
+          format: date
+        usd_rub:
+          type: number
+          format: float
+          description: Курс USD к RUB
+        eur_rub:
+          type: number
+          format: float
+          description: Курс EUR к RUB
+        eur_usd:
+          type: number
+          format: float
+          description: Курс EUR к USD (вычисляемый)
+        updated_at:
+          type: string
+          format: date-time
+
+    ExchangeRatesResponse:
+      type: object
+      required:
+        - rates
+      properties:
+        rates:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExchangeRateResponse'
+
+    HealthResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum: [healthy, unhealthy]
+        details:
+          type: object
+          properties:
+            database:
+              type: string
+              enum: [ok, error]
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          description: Код ошибки
+          example: "NOT_FOUND"
+        message:
+          type: string
+          description: Описание ошибки
+        details:
+          type: object
+          additionalProperties: true

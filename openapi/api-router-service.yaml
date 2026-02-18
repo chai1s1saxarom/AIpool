@@ -1,0 +1,556 @@
+openapi: 3.1.0
+info:
+  title: API Router Service
+  description: |
+    Основной роутер микросервисной архитектуры.
+    
+    Сервис отвечает за:
+    - Приём запросов от UI/клиентов
+    - Управление чатами (создание, история, закрытие)
+    - Маршрутизацию запросов к LLM и Image сервисам через RabbitMQ
+    - Агрегацию и возврат ответов клиентам
+    
+    **Технологии:** FastAPI, RabbitMQ, PostgreSQL, Redis
+  version: 1.0.0
+  contact:
+    name: API Support
+    email: support@example.com
+
+servers:
+  - url: http://localhost:8000
+    description: Local development server
+  - url: http://api-router:8000
+    description: Docker/Kubernetes internal
+
+tags:
+  - name: chats
+    description: Управление чатами
+  - name: messages
+    description: Отправка сообщений и получение ответов
+  - name: health
+    description: Проверка состояния сервиса
+
+paths:
+  /v1/chats:
+    get:
+      tags:
+        - chats
+      summary: Получить список чатов пользователя
+      description: Возвращает список всех чатов для указанного пользователя с пагинацией
+      operationId: listChats
+      parameters:
+        - name: user_id
+          in: query
+          required: true
+          description: UUID пользователя
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          required: false
+          description: Количество записей на странице
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+        - name: offset
+          in: query
+          required: false
+          description: Смещение для пагинации
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+      responses:
+        '200':
+          description: Список чатов успешно получен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatListResponse'
+        '400':
+          description: Некорректные параметры запроса
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    post:
+      tags:
+        - chats
+      summary: Создать новый чат
+      description: Создаёт новый чат для пользователя с опциональным названием
+      operationId: createChat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateChatRequest'
+      responses:
+        '201':
+          description: Чат успешно создан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '400':
+          description: Некорректные данные запроса
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/chats/{chat_id}:
+    get:
+      tags:
+        - chats
+      summary: Получить информацию о чате
+      description: Возвращает детальную информацию о конкретном чате
+      operationId: getChat
+      parameters:
+        - name: chat_id
+          in: path
+          required: true
+          description: UUID чата
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Информация о чате
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '404':
+          description: Чат не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      tags:
+        - chats
+      summary: Удалить чат
+      description: Удаляет чат и всю связанную историю сообщений
+      operationId: deleteChat
+      parameters:
+        - name: chat_id
+          in: path
+          required: true
+          description: UUID чата
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Чат успешно удалён
+        '404':
+          description: Чат не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/chats/{chat_id}/history:
+    get:
+      tags:
+        - chats
+      summary: Получить историю сообщений чата
+      description: Возвращает историю сообщений для указанного чата с пагинацией
+      operationId: getChatHistory
+      parameters:
+        - name: chat_id
+          in: path
+          required: true
+          description: UUID чата
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          required: false
+          description: Количество сообщений
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+        - name: offset
+          in: query
+          required: false
+          description: Смещение для пагинации
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+      responses:
+        '200':
+          description: История сообщений
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatHistoryResponse'
+        '404':
+          description: Чат не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/messages/send:
+    post:
+      tags:
+        - messages
+      summary: Отправить сообщение
+      description: |
+        Отправляет сообщение пользователя в чат и инициирует обработку AI-сервисами.
+        
+        Сообщение маршрутизируется на:
+        - LLM Processing Service (для текстовых запросов)
+        - Image Processing Service (для генерации/редактирования изображений)
+        
+        Тип обработки определяется по параметру `processing_type`.
+      operationId: sendMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+      responses:
+        '202':
+          description: Сообщение принято в обработку
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageAcceptedResponse'
+        '400':
+          description: Некорректные данные запроса
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Чат не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/messages/{request_id}/status:
+    get:
+      tags:
+        - messages
+      summary: Получить статус обработки сообщения
+      description: Возвращает текущий статус обработки запроса и результат (если готов)
+      operationId: getMessageStatus
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          description: UUID запроса пользователя
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Статус обработки
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageStatusResponse'
+        '404':
+          description: Запрос не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/health/liveness:
+    get:
+      tags:
+        - health
+      summary: Проверка живости сервиса
+      description: Возвращает 200 если сервис запущен
+      operationId: healthLiveness
+      responses:
+        '200':
+          description: Сервис работает
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /v1/health/readiness:
+    get:
+      tags:
+        - health
+      summary: Проверка готовности сервиса
+      description: Проверяет подключение к БД, Redis и RabbitMQ
+      operationId: healthReadiness
+      responses:
+        '200':
+          description: Сервис готов к работе
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Сервис не готов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+components:
+  schemas:
+    CreateChatRequest:
+      type: object
+      required:
+        - user_id
+      properties:
+        user_id:
+          type: string
+          format: uuid
+          description: UUID пользователя
+        name:
+          type: string
+          maxLength: 255
+          description: Название чата (опционально)
+          example: "Помощь с кодом"
+        metadata:
+          type: object
+          description: Дополнительные метаданные
+          additionalProperties: true
+
+    ChatResponse:
+      type: object
+      required:
+        - chat_id
+        - user_id
+        - status
+        - created_at
+      properties:
+        chat_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [active, closed]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ChatListResponse:
+      type: object
+      required:
+        - items
+        - total
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatResponse'
+        total:
+          type: integer
+          description: Общее количество чатов
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    ChatHistoryResponse:
+      type: object
+      required:
+        - chat_id
+        - messages
+      properties:
+        chat_id:
+          type: string
+          format: uuid
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+        total:
+          type: integer
+
+    ChatMessage:
+      type: object
+      required:
+        - message_id
+        - role
+        - content
+        - created_at
+      properties:
+        message_id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [user, assistant, system]
+        content:
+          type: string
+        processing_type:
+          type: string
+          enum: [llm, image]
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+
+    SendMessageRequest:
+      type: object
+      required:
+        - chat_id
+        - user_id
+        - message
+        - processing_type
+      properties:
+        chat_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        message:
+          type: string
+          minLength: 1
+          maxLength: 32000
+          description: Текст сообщения пользователя
+        processing_type:
+          type: string
+          enum: [llm, image]
+          description: |
+            Тип обработки:
+            - llm: текстовый запрос к LLM
+            - image: генерация/редактирование изображения
+        model_id:
+          type: string
+          description: ID модели (опционально, используется дефолтная)
+          example: "openai_gpt-4o-mini"
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+          default: 0.7
+          description: Температура генерации для LLM
+        max_tokens:
+          type: integer
+          minimum: 1
+          maximum: 16000
+          default: 4000
+          description: Максимальное количество токенов ответа
+
+    MessageAcceptedResponse:
+      type: object
+      required:
+        - request_id
+        - status
+      properties:
+        request_id:
+          type: string
+          format: uuid
+          description: UUID запроса для отслеживания статуса
+        status:
+          type: string
+          enum: [accepted]
+        message:
+          type: string
+          example: "Запрос принят в обработку"
+
+    MessageStatusResponse:
+      type: object
+      required:
+        - request_id
+        - status
+      properties:
+        request_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, processing, done, failed]
+        result:
+          $ref: '#/components/schemas/MessageResult'
+          nullable: true
+        error:
+          type: string
+          nullable: true
+        processing_time_ms:
+          type: integer
+          nullable: true
+
+    MessageResult:
+      type: object
+      properties:
+        content:
+          type: string
+          description: Текст ответа или URL изображения
+        input_tokens:
+          type: integer
+          nullable: true
+        output_tokens:
+          type: integer
+          nullable: true
+        total_cost_usd:
+          type: number
+          format: float
+          nullable: true
+        model_id:
+          type: string
+
+    HealthResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum: [healthy, unhealthy]
+        details:
+          type: object
+          properties:
+            database:
+              type: string
+              enum: [ok, error]
+            rabbitmq:
+              type: string
+              enum: [ok, error]
+            redis:
+              type: string
+              enum: [ok, error]
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          description: Код ошибки
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          description: Описание ошибки
+        details:
+          type: object
+          additionalProperties: true
