@@ -7,7 +7,7 @@ QUEUE = "lab_queue"
 def main() -> None:
     url = os.environ.get("RABBITMQ_URL", "amqp://guest:guest@rabbitmq:5672/")
     print("Ожидание сообщений", flush=True)
-    params = pika.URLParameters(url)
+    params = pika.ConnectionParameters(host='rabbitmq', port=5672)
     connection = pika.BlockingConnection(params)
     channel = connection.channel()
     channel.queue_declare(queue=QUEUE, durable=True)

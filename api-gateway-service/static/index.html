@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Pool — Панель управления</title>
+  <link rel="stylesheet" href="/assets/styles.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-icon">◆</span>
+        <div>
+          <h1>AI Pool</h1>
+          <p class="subtitle">Микросервисная платформа</p>
+        </div>
+      </div>
+      <div class="user-block">
+        <label for="userId">User ID</label>
+        <input id="userId" type="text" placeholder="UUID пользователя" />
+        <button id="btnNewUser" class="btn-secondary btn-sm">Новый UUID</button>
+      </div>
+      <div class="chats-header">
+        <span>Чаты</span>
+        <button id="btnNewChat" class="btn-primary btn-sm">+ Чат</button>
+      </div>
+      <ul id="chatList" class="chat-list"></ul>
+      <div id="servicesStatus" class="services-status"></div>
+    </aside>
+
+    <main class="main">
+      <header class="main-header">
+        <h2 id="chatTitle">Выберите или создайте чат</h2>
+        <div class="mode-toggle">
+          <label><input type="radio" name="mode" value="llm" checked /> LLM</label>
+          <label><input type="radio" name="mode" value="image" /> Изображение</label>
+        </div>
+      </header>
+
+      <section id="messages" class="messages"></section>
+
+      <form id="sendForm" class="composer">
+        <select id="modelSelect" class="model-select"></select>
+        <textarea id="messageInput" rows="2" placeholder="Введите запрос…" disabled></textarea>
+        <button type="submit" id="btnSend" class="btn-primary" disabled>Отправить</button>
+      </form>
+      <div id="statusBar" class="status-bar hidden"></div>
+    </main>
+  </div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

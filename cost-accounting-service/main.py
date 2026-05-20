@@ -1,140 +1,52 @@
 """
-Модуль-заглушка для микросервиса учёта затрат.
-Реализует OpenAPI спецификацию Cost Accounting Service.
+Модуль для микросервиса учёта затрат.
+Реализует OpenAPI спецификацию Cost Accounting Service с асинхронными операциями.
 """
 from datetime import date, datetime, timedelta
 from typing import Optional, List, Dict
 from uuid import uuid4, UUID
+import time
 
-from fastapi import FastAPI, HTTPException, Query, Path
-from pydantic import BaseModel, Field
-from enum import Enum
+from fastapi import FastAPI, HTTPException, Query, Path, Depends, BackgroundTasks
+from sqlalchemy.orm import Session
 
-# ---------- Модели данных (Pydantic) ----------
-class Currency(str, Enum):
-    USD = "USD"
-    RUB = "RUB"
-    EUR = "EUR"
+from app import models, schemas, crud
+from app.database import engine, get_db
+from app.external_api import get_exchange_rates_api, get_exchange_rates_history, get_consolidated_financial_data
+from app.background_tasks import log_to_file, update_exchange_rates, analytics_log
+from app.rabbit_publisher import publish_cost_event
 
-class CreateCostRecordRequest(BaseModel):
-    service_name: str
-    user_request_id: UUID
-    job_id: Optional[str] = None
-    currency: Currency
-    amount: float = Field(gt=0)
+# Создаем таблицы в БД если их нет (для разработки)
+models.Base.metadata.create_all(bind=engine)
 
-class CreateCostRecordV2Request(BaseModel):
-    service_name: str
-    user_request_id: UUID
-    job_id: Optional[str] = None
-    model_id: str
-    prompt_tokens: int = Field(ge=0)
-    completion_tokens: int = Field(ge=0)
+app = FastAPI(
+    title="Cost Accounting Service",
+    description="Сервис учёта затрат на использование AI-сервисов с поддержкой асинхронных вызовов",
+    version="1.0.0"
+)
 
-class CostRecordResponse(BaseModel):
-    id: UUID
-    service_name: str
-    user_request_id: UUID
-    job_id: Optional[str]
-    currency: Currency            # исходная валюта
-    rub_amount: float
-    usd_amount: float
-    eur_amount: float
-    usd_rate: float                # курс USD/RUB на момент создания
-    eur_rate: float                # курс EUR/RUB на момент создания
-    created_at: datetime
-
-class CostRecordListResponse(BaseModel):
-    items: List[CostRecordResponse]
-    total: int
-    limit: int
-    offset: int
-
-class UserRequestCostResponse(BaseModel):
-    user_request_id: UUID
-    total_rub: float
-    total_usd: float
-    total_eur: float
-    records_count: int
-
-class CostsSummaryResponse(BaseModel):
-    period: dict
-    total: dict
-    breakdown: List[dict]
-
-class ExchangeRateResponse(BaseModel):
-    date: date
-    usd_rub: float
-    eur_rub: float
-    eur_usd: Optional[float] = None
-    updated_at: datetime
-
-class ExchangeRatesResponse(BaseModel):
-    rates: List[ExchangeRateResponse]
-
-class HealthResponse(BaseModel):
-    status: str
-    details: Optional[dict] = None
-
-class ErrorResponse(BaseModel):
-    error: str
-    message: str
-    details: Optional[dict] = None
-
-# ---------- "База данных" в памяти ----------
-# Хранилище записей о затратах
-costs_db: Dict[UUID, CostRecordResponse] = {}
-
-# Справочник цен моделей (USD за 1000 токенов)
+# Модель цен для различных LLM-моделей (USD за 1000 токенов)
 MODEL_PRICES = {
     "openai_gpt-4o-mini": {"input": 0.15, "output": 0.60},
     "openai_gpt-4o": {"input": 5.00, "output": 15.00},
     "yandexgpt": {"input": 1.00, "output": 3.00},
-    # другие модели можно добавить
 }
 
-# Хранилище курсов валют (история)
-exchange_rates_db: List[ExchangeRateResponse] = []
-
-# Инициализируем несколькими записями для демонстрации
-def init_exchange_rates():
-    today = date.today()
-    for i in range(7):
-        day = today - timedelta(days=i)
-        # случайные или фиксированные курсы
-        rate = ExchangeRateResponse(
-            date=day,
-            usd_rub=90.0 + i * 0.5,
-            eur_rub=100.0 + i * 0.3,
-            updated_at=datetime.now() - timedelta(days=i)
-        )
-        rate.eur_usd = rate.eur_rub / rate.usd_rub
-        exchange_rates_db.append(rate)
-
-init_exchange_rates()
-
-# ---------- Приложение FastAPI ----------
-app = FastAPI(
-    title="Cost Accounting Service",
-    description="Сервис учёта затрат на использование AI-сервисов (учебная реализация)",
-    version="1.0.0"
-)
-
-# ---------- Вспомогательные функции ----------
-def get_current_rates() -> tuple[float, float]:
+# Вспомогательные функции
+def get_current_rates(db: Session) -> tuple[float, float]:
     """Возвращает последние актуальные курсы USD/RUB и EUR/RUB"""
-    if exchange_rates_db:
-        latest = sorted(exchange_rates_db, key=lambda x: x.date, reverse=True)[0]
+    latest = crud.get_latest_exchange_rate(db)
+    if latest:
         return latest.usd_rub, latest.eur_rub
     return 90.0, 100.0  # fallback
 
-def convert_amount(amount: float, from_currency: Currency, usd_rate: float, eur_rate: float) -> dict:
+def convert_amount(amount: float, from_currency: schemas.Currency, usd_rate: float, eur_rate: float) -> dict:
     """Конвертирует сумму из исходной валюты в RUB, USD, EUR."""
-    if from_currency == Currency.RUB:
+    if from_currency == schemas.Currency.RUB:
         rub = amount
         usd = amount / usd_rate
         eur = amount / eur_rate
-    elif from_currency == Currency.USD:
+    elif from_currency == schemas.Currency.USD:
         usd = amount
         rub = amount * usd_rate
         eur = amount * (usd_rate / eur_rate)
@@ -142,215 +54,260 @@ def convert_amount(amount: float, from_currency: Currency, usd_rate: float, eur_
         eur = amount
         rub = amount * eur_rate
         usd = amount * (eur_rate / usd_rate)
-    return {"rub": round(rub, 2), "usd": round(usd, 4), "eur": round(eur, 4)}
+    return {
+        "rub": round(rub, 2),
+        "usd": round(usd, 4),
+        "eur": round(eur, 4),
+        "usd_rate": usd_rate,
+        "eur_rate": eur_rate
+    }
 
-def filter_costs(
-    user_request_id: Optional[UUID] = None,
-    service_name: Optional[str] = None,
-    date_from: Optional[date] = None,
-    date_to: Optional[date] = None
-) -> List[CostRecordResponse]:
-    """Фильтрация записей по параметрам"""
-    items = list(costs_db.values())
-    if user_request_id:
-        items = [c for c in items if c.user_request_id == user_request_id]
-    if service_name:
-        items = [c for c in items if c.service_name == service_name]
-    if date_from:
-        dt_from = datetime.combine(date_from, datetime.min.time())
-        items = [c for c in items if c.created_at >= dt_from]
-    if date_to:
-        dt_to = datetime.combine(date_to, datetime.max.time())
-        items = [c for c in items if c.created_at <= dt_to]
-    return items
+# Эндпоинты для учета затрат
+@app.get("/", tags=["root"])
+def root():
+    """Корневой эндпоинт для проверки работоспособности"""
+    return {
+        "service": "Cost Accounting Service",
+        "version": "1.0.0",
+        "status": "running",
+        "docs_url": "/docs"
+    }
 
-# ---------- Эндпоинты ----------
-@app.get("/v1/costs", response_model=CostRecordListResponse, tags=["costs"])
+@app.get("/v1/costs", response_model=schemas.CostRecordListResponse, tags=["costs"])
 def list_costs(
-    user_request_id: Optional[UUID] = Query(None),
-    service_name: Optional[str] = Query(None),
-    date_from: Optional[date] = Query(None),
-    date_to: Optional[date] = Query(None),
-    limit: int = Query(20, ge=1, le=100),
-    offset: int = Query(0, ge=0)
+        user_request_id: Optional[UUID] = Query(None),
+        service_name: Optional[str] = Query(None),
+        date_from: Optional[date] = Query(None),
+        date_to: Optional[date] = Query(None),
+        limit: int = Query(20, ge=1, le=100),
+        offset: int = Query(0, ge=0),
+        db: Session = Depends(get_db)
 ):
-    filtered = filter_costs(user_request_id, service_name, date_from, date_to)
-    total = len(filtered)
-    items = filtered[offset:offset + limit]
-    return CostRecordListResponse(items=items, total=total, limit=limit, offset=offset)
+    """
+    Получить список всех записей о затратах с возможностью фильтрации
+    и пагинацией.
+    """
+    return crud.get_cost_records(
+        db,
+        user_request_id=user_request_id,
+        service_name=service_name,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+        offset=offset
+    )
 
-@app.post("/v1/costs", response_model=CostRecordResponse, status_code=201, tags=["costs"])
-def create_cost_record(record: CreateCostRecordRequest):
-    usd_rate, eur_rate = get_current_rates()
+
+# ИСПРАВЛЕНО: был потерян декоратор @app.post — эндпоинт не был зарегистрирован!
+@app.post("/v1/costs", response_model=schemas.CostRecordResponse, status_code=201, tags=["costs"])
+def create_cost_record(
+        record: schemas.CreateCostRecordRequest,
+        background_tasks: BackgroundTasks,  # Просто тип, без Depends()
+        db: Session = Depends(get_db)
+):
+
+    """
+    Создать новую запись о затратах с указанием суммы вручную.
+
+    Автоматически конвертирует сумму в другие валюты по актуальному курсу.
+    """
+    start_time = time.time()
+
+    usd_rate, eur_rate = get_current_rates(db)
     converted = convert_amount(record.amount, record.currency, usd_rate, eur_rate)
 
-    new_id = uuid4()
-    now = datetime.now()
-    cost_record = CostRecordResponse(
-        id=new_id,
-        service_name=record.service_name,
-        user_request_id=record.user_request_id,
-        job_id=record.job_id,
-        currency=record.currency,
-        rub_amount=converted["rub"],
-        usd_amount=converted["usd"],
-        eur_amount=converted["eur"],
-        usd_rate=usd_rate,
-        eur_rate=eur_rate,
-        created_at=now
-    )
-    costs_db[new_id] = cost_record
-    return cost_record
+    result = crud.create_cost_record(db, record, converted)
 
-@app.post("/v2/costs", response_model=CostRecordResponse, status_code=201, tags=["costs"])
-def create_cost_record_v2(record: CreateCostRecordV2Request):
+    # Добавляем фоновую задачу для логирования
+    execution_time = int((time.time() - start_time) * 1000)
+    background_tasks.add_task(
+        analytics_log,
+        record.user_request_id,
+        "create_cost_record",
+        execution_time
+    )
+    background_tasks.add_task(
+        log_to_file,
+        f"Cost record created: {record.service_name}, amount: {record.amount} {record.currency}"
+    )
+
+    # Публикуем событие в RabbitMQ — в фоне, чтобы не задерживать HTTP-ответ
+    background_tasks.add_task(
+        publish_cost_event,
+        "cost_record_created",
+        {
+            "id": str(result.id),
+            "service_name": result.service_name,
+            "user_request_id": str(result.user_request_id),
+            "job_id": result.job_id,
+            "currency": str(record.currency),
+            "usd_amount": result.usd_amount,
+            "rub_amount": result.rub_amount,
+            "eur_amount": result.eur_amount,
+            "created_at": result.created_at.isoformat()
+        }
+    )
+
+    return result
+
+@app.post("/v2/costs", response_model=schemas.CostRecordResponse, status_code=201, tags=["costs"])
+def create_cost_record_v2(
+        record: schemas.CreateCostRecordV2Request,
+        background_tasks: BackgroundTasks, # Добавляем Depends()
+        db: Session = Depends(get_db)
+):
+    """
+    Создать запись о затратах с автоматическим расчётом стоимости по токенам.
+
+    Стоимость рассчитывается по формуле:
+    `(input_tokens * input_price) + (output_tokens * output_price)`
+
+    Цены берутся из справочника по `model_id`.
+    """
     if record.model_id not in MODEL_PRICES:
-        raise HTTPException(status_code=422, detail=ErrorResponse(
-            error="UNKNOWN_MODEL",
-            message=f"Модель {record.model_id} не найдена в справочнике"
-        ).dict())
+        raise HTTPException(status_code=422, detail={"error": "UNKNOWN_MODEL", "message": f"Модель {record.model_id} не найдена в справочнике"})
+
+    start_time = time.time()
 
     prices = MODEL_PRICES[record.model_id]
     # расчёт в USD
     cost_usd = (record.prompt_tokens / 1000) * prices["input"] + (record.completion_tokens / 1000) * prices["output"]
 
-    usd_rate, eur_rate = get_current_rates()
+    usd_rate, eur_rate = get_current_rates(db)
     # переводим в рубли и евро
     rub_amount = cost_usd * usd_rate
-    eur_amount = cost_usd * (usd_rate / eur_rate)  # или cost_usd * usd_rate / eur_rate?
+    eur_amount = cost_usd * (usd_rate / eur_rate)
 
-    new_id = uuid4()
-    now = datetime.now()
-    cost_record = CostRecordResponse(
-        id=new_id,
+    # Создаем запись через модель CreateCostRecordRequest
+    cost_request = schemas.CreateCostRecordRequest(
         service_name=record.service_name,
         user_request_id=record.user_request_id,
         job_id=record.job_id,
-        currency=Currency.USD,   # исходная валюта расчёта — USD
-        rub_amount=round(rub_amount, 2),
-        usd_amount=round(cost_usd, 4),
-        eur_amount=round(eur_amount, 4),
-        usd_rate=usd_rate,
-        eur_rate=eur_rate,
-        created_at=now
+        currency=schemas.Currency.USD,
+        amount=cost_usd
     )
-    costs_db[new_id] = cost_record
-    return cost_record
 
-@app.get("/v1/costs/{cost_id}", response_model=CostRecordResponse, tags=["costs"])
-def get_cost_record(cost_id: UUID = Path(..., description="UUID записи")):
-    if cost_id not in costs_db:
-        raise HTTPException(status_code=404, detail=ErrorResponse(
-            error="NOT_FOUND",
-            message="Запись не найдена"
-        ).dict())
-    return costs_db[cost_id]
+    converted = {
+        "rub": round(rub_amount, 2),
+        "usd": round(cost_usd, 4),
+        "eur": round(eur_amount, 4),
+        "usd_rate": usd_rate,
+        "eur_rate": eur_rate
+    }
+
+    result = crud.create_cost_record(db, cost_request, converted)
+
+    # Добавляем фоновую задачу для логирования
+    execution_time = int((time.time() - start_time) * 1000)
+    background_tasks.add_task(
+        analytics_log,
+        record.user_request_id,
+        "create_cost_record_v2",
+        execution_time
+    )
+    background_tasks.add_task(
+        log_to_file,
+        f"Cost record created by tokens: {record.service_name}, model: {record.model_id}, "
+        f"tokens: {record.prompt_tokens}/{record.completion_tokens}, cost: {cost_usd} USD"
+    )
+
+    # Публикуем событие в RabbitMQ с расширенными данными по токенам
+    background_tasks.add_task(
+        publish_cost_event,
+        "cost_record_created_v2",
+        {
+            "id": str(result.id),
+            "service_name": result.service_name,
+            "user_request_id": str(result.user_request_id),
+            "job_id": result.job_id,
+            "model_id": record.model_id,
+            "prompt_tokens": record.prompt_tokens,
+            "completion_tokens": record.completion_tokens,
+            "usd_amount": result.usd_amount,
+            "rub_amount": result.rub_amount,
+            "eur_amount": result.eur_amount,
+            "created_at": result.created_at.isoformat()
+        }
+    )
+
+    return result
+
+@app.get("/v1/costs/{cost_id}", response_model=schemas.CostRecordResponse, tags=["costs"])
+def get_cost_record(cost_id: UUID = Path(...), db: Session = Depends(get_db)):
+    """Получить детальную информацию о записи затрат по ID"""
+    record = crud.get_cost_record(db, cost_id)
+    if not record:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Запись не найдена"})
+    return record
 
 @app.delete("/v1/costs/{cost_id}", status_code=204, tags=["costs"])
-def delete_cost_record(cost_id: UUID = Path(...)):
-    if cost_id not in costs_db:
-        raise HTTPException(status_code=404, detail=ErrorResponse(
-            error="NOT_FOUND",
-            message="Запись не найдена"
-        ).dict())
-    del costs_db[cost_id]
+def delete_cost_record(cost_id: UUID = Path(...), db: Session = Depends(get_db)):
+    """Удалить запись о затратах"""
+    success = crud.delete_cost_record(db, cost_id)
+    if not success:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Запись не найдена"})
+    return None
 
-@app.get("/v1/costs/user-request/{user_request_id}", response_model=UserRequestCostResponse, tags=["statistics"])
-def get_user_request_cost(user_request_id: UUID = Path(...)):
-    records = filter_costs(user_request_id=user_request_id)
-    if not records:
-        raise HTTPException(status_code=404, detail=ErrorResponse(
-            error="NOT_FOUND",
-            message="Записи не найдены"
-        ).dict())
-
-    total_rub = sum(r.rub_amount for r in records)
-    total_usd = sum(r.usd_amount for r in records)
-    total_eur = sum(r.eur_amount for r in records)
-    return UserRequestCostResponse(
-        user_request_id=user_request_id,
-        total_rub=round(total_rub, 2),
-        total_usd=round(total_usd, 4),
-        total_eur=round(total_eur, 4),
-        records_count=len(records)
-    )
-
-@app.get("/v1/statistics/summary", response_model=CostsSummaryResponse, tags=["statistics"])
-def get_costs_summary(
-    date_from: date = Query(...),
-    date_to: date = Query(...),
-    group_by: str = Query("day", enum=["day", "week", "month", "service"])
+# Асинхронные эндпоинты для работы с внешними API
+@app.get("/v1/exchange-rates/async", tags=["exchange-rates"])
+async def get_exchange_rates_async(
+        background_tasks: BackgroundTasks,  # Move this before any default arguments
 ):
-    filtered = filter_costs(date_from=date_from, date_to=date_to)
-    total_rub = sum(r.rub_amount for r in filtered)
-    total_usd = sum(r.usd_amount for r in filtered)
-    total_eur = sum(r.eur_amount for r in filtered)
-    total_count = len(filtered)
+    """Асинхронно получает актуальные курсы валют из внешнего API"""
+    rates = await get_exchange_rates_api()
 
-    # Упрощённая группировка (только для демонстрации)
-    # В реальном проекте здесь была бы агрегация по БД
-    breakdown = []
-    if group_by == "service":
-        groups = {}
-        for r in filtered:
-            groups.setdefault(r.service_name, {"rub": 0, "usd": 0, "eur": 0, "count": 0})
-            groups[r.service_name]["rub"] += r.rub_amount
-            groups[r.service_name]["usd"] += r.usd_amount
-            groups[r.service_name]["eur"] += r.eur_amount
-            groups[r.service_name]["count"] += 1
-        for key, vals in groups.items():
-            breakdown.append({
-                "group_key": key,
-                "rub": round(vals["rub"], 2),
-                "usd": round(vals["usd"], 4),
-                "eur": round(vals["eur"], 4),
-                "records_count": vals["count"]
-            })
-    else:
-        # по дням (упрощённо)
-        days = {}
-        for r in filtered:
-            day = r.created_at.date().isoformat()
-            days.setdefault(day, {"rub": 0, "usd": 0, "eur": 0, "count": 0})
-            days[day]["rub"] += r.rub_amount
-            days[day]["usd"] += r.usd_amount
-            days[day]["eur"] += r.eur_amount
-            days[day]["count"] += 1
-        for key, vals in days.items():
-            breakdown.append({
-                "group_key": key,
-                "rub": round(vals["rub"], 2),
-                "usd": round(vals["usd"], 4),
-                "eur": round(vals["eur"], 4),
-                "records_count": vals["count"]
-            })
+    # Добавляем фоновую задачу для обновления курсов в БД
+    background_tasks.add_task(update_exchange_rates, rates)
 
-    return CostsSummaryResponse(
-        period={"date_from": date_from.isoformat(), "date_to": date_to.isoformat()},
-        total={"rub": round(total_rub, 2), "usd": round(total_usd, 4), "eur": round(total_eur, 4), "records_count": total_count},
-        breakdown=breakdown
-    )
+    return rates
 
-@app.get("/v1/exchange-rates", response_model=ExchangeRatesResponse, tags=["exchange-rates"])
-def get_exchange_rates(limit: int = Query(7, ge=1, le=30)):
-    sorted_rates = sorted(exchange_rates_db, key=lambda x: x.date, reverse=True)
-    return ExchangeRatesResponse(rates=sorted_rates[:limit])
+@app.get("/v1/exchange-rates/history/async", tags=["exchange-rates"])
+async def get_exchange_rates_history_async(
+        background_tasks: BackgroundTasks,
+        days: int = Query(7, ge=1, le=30)
+):
+    """Асинхронно получает историю курсов валют за указанное количество дней"""
+    rates = await get_exchange_rates_history(days)
+    background_tasks.add_task(log_to_file, f"Exchange rates history requested: {days} days")
+    return {"rates": rates}
 
-@app.get("/v1/exchange-rates/{date}", response_model=ExchangeRateResponse, tags=["exchange-rates"])
-def get_exchange_rate_by_date(date: date = Path(..., description="Дата в формате YYYY-MM-DD")):
-    for rate in exchange_rates_db:
-        if rate.date == date:
-            return rate
-    raise HTTPException(status_code=404, detail=ErrorResponse(
-        error="NOT_FOUND",
-        message="Курс на указанную дату не найден"
-    ).dict())
+@app.get("/v1/financial-data", tags=["statistics"])
+async def get_financial_data():
+    """
+    Параллельно получает данные из нескольких источников и объединяет их.
+    Демонстрирует использование asyncio.gather().
+    """
+    return await get_consolidated_financial_data()
 
-@app.get("/v1/health/liveness", response_model=HealthResponse, tags=["health"])
+@app.get("/v1/exchange-rates", response_model=schemas.ExchangeRatesResponse, tags=["exchange-rates"])
+def get_exchange_rates(limit: int = Query(7, ge=1, le=30), db: Session = Depends(get_db)):
+    """Получить актуальные курсы валют из БД"""
+    rates = crud.get_exchange_rates(db, limit)
+    return {"rates": rates}
+
+@app.get("/v1/exchange-rates/{date}", response_model=schemas.ExchangeRateResponse, tags=["exchange-rates"])
+def get_exchange_rate_by_date(date: date = Path(...), db: Session = Depends(get_db)):
+    """Получить курсы валют на указанную дату"""
+    rate = crud.get_exchange_rate_by_date(db, date)
+    if not rate:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Курс на указанную дату не найден"})
+    return rate
+
+# Эндпоинты для проверки здоровья сервиса
+@app.get("/v1/health/liveness", response_model=schemas.HealthResponse, tags=["health"])
 def health_liveness():
-    return HealthResponse(status="healthy", details={"database": "ok"})
+    """Проверка живости сервиса"""
+    return schemas.HealthResponse(status="healthy", details={"database": "ok"})
 
-@app.get("/v1/health/readiness", response_model=HealthResponse, tags=["health"])
-def health_readiness():
-    # Проверяем, что база данных доступна (всегда true для in-memory)
-    return HealthResponse(status="healthy", details={"database": "ok"})
+@app.get("/v1/health/readiness", response_model=schemas.HealthResponse, tags=["health"])
+def health_readiness(db: Session = Depends(get_db)):
+    """Проверка готовности сервиса (проверка подключения к БД)"""
+    try:
+        # Проверяем подключение к БД
+        db.execute("SELECT 1")
+        db_status = "ok"
+    except Exception:
+        db_status = "error"
+
+    status = "healthy" if db_status == "ok" else "unhealthy"
+    return schemas.HealthResponse(status=status, details={"database": db_status})

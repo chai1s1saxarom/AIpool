@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Копируем код приложения (при разработке можно не копировать, а использовать bind mount)
 COPY main.py .
+COPY app/ ./app/
 
 # Запускаем сервер с авто-перезагрузкой (для разработки)
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

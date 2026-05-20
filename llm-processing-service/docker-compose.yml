@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+
+  # ── RabbitMQ (Практика №7) ────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: llm-rabbit
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # веб-интерфейс: http://localhost:15672 (guest/guest)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  # ── PostgreSQL (Практика №5) ──────────────────────────────────
+  db:
+    image: postgres:15
+    container_name: llm-db
+    environment:
+      POSTGRES_DB: llmdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - llm-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 5
+    networks:
+      - backend
+
+  # ── LLM Processing Service ─────────────────────────────────────
+  llm-service:
+    build: .
+    container_name: llm-processing-service
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://postgres:password@db:5432/llmdb
+      RABBITMQ_HOST: rabbitmq
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - .:/app   # bind mount для live-reload (Практика №3)
+    networks:
+      - backend
+
+networks:
+  backend:
+    driver: bridge
+
+volumes:
+  llm-db-data:

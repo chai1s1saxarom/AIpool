@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+
+  # Брокер сообщений — запускаем первым, остальные ждут его готовности
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: cost-broker
+    ports:
+      - "5672:5672"       # порт для приложений (AMQP)
+      - "15672:15672"     # порт веб-интерфейса управления
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  cost-accounting:
+    build: .
+    container_name: cost-accounting
+    ports:
+      - "8003:8000"
+    volumes:
+      - .:/app
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@cost-db:5432/cost_db
+      - EXCHANGE_RATE_API_KEY=demo_key
+      - RABBITMQ_HOST=rabbitmq     # имя сервиса внутри Docker-сети
+    depends_on:
+      cost-db:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy  # ждём, пока RabbitMQ реально готов
+    networks:
+      - backend
+
+  # Потребитель событий — слушает очередь и обрабатывает события о затратах
+  cost-consumer:
+    build: ./consumer
+    container_name: cost-consumer
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - backend
+
+  cost-db:
+    image: postgres:15
+    container_name: cost-db
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=cost_db
+    volumes:
+      - cost-db-data:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+    networks:
+      - backend
+
+  api-router:
+    image: python:3.11-slim
+    container_name: api-router
+    command: sh -c "echo 'API Router service mock' && sleep infinity"
+    networks:
+      - backend
+    ports:
+      - "8000:8000"
+
+volumes:
+  cost-db-data:
+
+networks:
+  backend:
+    driver: bridge

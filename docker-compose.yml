@@ -1,0 +1,171 @@
+# Полный стек AI Pool — запуск всех микросервисов
+# docker compose up --build -d
+
+services:
+  api-gateway:
+    build: ./api-gateway-service
+    ports:
+      - "8080:8000"
+    environment:
+      LLM_SERVICE_URL: http://llm-service:8000
+      IMAGE_SERVICE_URL: http://image-service:8000
+      COST_SERVICE_URL: http://cost-service:8000
+      DATABASE_URL: sqlite:////data/gateway.db
+    volumes:
+      - gateway-data:/data
+    depends_on:
+      llm-service:
+        condition: service_healthy
+      image-service:
+        condition: service_healthy
+      cost-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/v1/health/liveness')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - aipool
+
+  llm-db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: llmdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 5
+    networks:
+      - aipool
+
+  llm-rabbitmq:
+    image: rabbitmq:3-management-alpine
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - aipool
+
+  llm-service:
+    build: ./llm-processing-service
+    environment:
+      DATABASE_URL: postgresql://postgres:password@llm-db:5432/llmdb
+      RABBITMQ_HOST: llm-rabbitmq
+    depends_on:
+      llm-db:
+        condition: service_healthy
+      llm-rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/v1/health/liveness')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 25s
+    networks:
+      - aipool
+
+  image-db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "123"
+      POSTGRES_DB: image_db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 5
+    networks:
+      - aipool
+
+  image-rabbitmq:
+    image: rabbitmq:3-management-alpine
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - aipool
+
+  image-service:
+    build: ./image-processing-service
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:123@image-db:5432/image_db
+      RABBITMQ_URL: amqp://guest:guest@image-rabbitmq:5672/
+    depends_on:
+      image-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/v1/health/liveness')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    networks:
+      - aipool
+
+  cost-db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: cost_db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 5
+    networks:
+      - aipool
+
+  cost-rabbitmq:
+    image: rabbitmq:3-management-alpine
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - aipool
+
+  cost-service:
+    build: ./cost-accounting-service
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      DATABASE_URL: postgresql://postgres:password@cost-db:5432/cost_db
+      RABBITMQ_HOST: cost-rabbitmq
+    depends_on:
+      cost-db:
+        condition: service_healthy
+      cost-rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/v1/health/liveness')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - aipool
+
+  cost-consumer:
+    build: ./cost-accounting-service/consumer
+    environment:
+      RABBITMQ_HOST: cost-rabbitmq
+    depends_on:
+      cost-rabbitmq:
+        condition: service_healthy
+    networks:
+      - aipool
+
+networks:
+  aipool:
+    driver: bridge
+
+volumes:
+  gateway-data:
