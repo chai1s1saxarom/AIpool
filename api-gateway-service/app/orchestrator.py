@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from uuid import UUID
+
 from sqlalchemy.orm import Session
 
 from app.clients import ServiceClients
@@ -26,11 +28,19 @@ def _map_job_status(raw: str) -> str:
 
 async def poll_request(request_id: str, clients: ServiceClients) -> None:
     """Опрашивает backend-задачу и обновляет сообщение в БД gateway."""
+    rid = UUID(request_id)
     for _ in range(MAX_POLL_ATTEMPTS):
         await asyncio.sleep(POLL_INTERVAL_SEC)
         db: Session = SessionLocal()
         try:
-            msg = db.query(ChatMessage).filter(ChatMessage.request_id == request_id).first()
+            msg = (
+                db.query(ChatMessage)
+                .filter(
+                    ChatMessage.request_id == rid,
+                    ChatMessage.role == "assistant",
+                )
+                .first()
+            )
             if not msg or not msg.backend_job_id:
                 return
             if msg.status in ("done", "failed"):
@@ -43,6 +53,7 @@ async def poll_request(request_id: str, clients: ServiceClients) -> None:
                 if status == "done" and data.get("result"):
                     result = data["result"]
                     msg.result_content = result.get("response")
+                    msg.content = result.get("response") or msg.content
                     msg.total_cost_usd = result.get("total_cost_usd")
                     msg.processing_time_ms = data.get("processing_time_ms")
                     await clients.record_llm_cost(
@@ -70,6 +81,7 @@ async def poll_request(request_id: str, clients: ServiceClients) -> None:
                         except Exception:  # noqa: BLE001
                             image_url = f"/images/{image_id}"
                     msg.result_content = image_url or "Image generated"
+                    msg.content = msg.result_content
                     msg.processing_time_ms = data.get("processing_time_ms")
                     await clients.record_image_cost(
                         str(msg.request_id),

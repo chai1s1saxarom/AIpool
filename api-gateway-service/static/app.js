@@ -25,8 +25,12 @@ async function api(path, options = {}) {
     ...options,
   });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ message: res.statusText }));
-    throw new Error(err.message || err.detail?.message || res.statusText);
+    const err = await res.json().catch(() => ({}));
+    let msg = err.message || err.detail?.message;
+    if (!msg && Array.isArray(err.detail)) {
+      msg = err.detail.map((d) => `${d.loc?.join(".")}: ${d.msg}`).join("; ");
+    }
+    throw new Error(msg || res.statusText);
   }
   if (res.status === 204) return null;
   return res.json();

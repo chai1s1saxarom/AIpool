@@ -2,6 +2,7 @@ import os
 
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("SKIP_JOB_PROCESSING", "1")
+os.environ.setdefault("ENABLE_METRICS", "true")
 
 import pytest
 import pytest_asyncio

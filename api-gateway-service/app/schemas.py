@@ -35,11 +35,10 @@ class ChatMessageSchema(BaseModel):
     role: Literal["user", "assistant", "system"]
     content: str
     processing_type: Optional[Literal["llm", "image"]] = None
-    metadata: Optional[dict[str, Any]] = None
+    status: Optional[str] = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 
 class ChatHistoryResponse(BaseModel):

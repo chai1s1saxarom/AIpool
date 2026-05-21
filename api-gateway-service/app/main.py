@@ -9,7 +9,7 @@ from typing import Optional
 from uuid import UUID
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -71,7 +71,7 @@ async def ui_index():
 
 
 @app.get("/v1/services/status", response_model=schemas.ServicesStatusResponse, tags=["info"])
-async def services_status(request):
+async def services_status(request: Request):
     c: ServiceClients = _clients(request)
     return schemas.ServicesStatusResponse(
         gateway="ok",
@@ -147,7 +147,7 @@ def get_chat_history(
 
 
 @app.post("/v1/messages/send", response_model=schemas.MessageAcceptedResponse, status_code=202, tags=["messages"])
-async def send_message(body: schemas.SendMessageRequest, request, db: Session = Depends(get_db)):
+async def send_message(body: schemas.SendMessageRequest, request: Request, db: Session = Depends(get_db)):
     chat = db.get(models.Chat, body.chat_id)
     if not chat or chat.status != "active":
         raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "Чат не найден"})
@@ -214,7 +214,7 @@ async def send_message(body: schemas.SendMessageRequest, request, db: Session = 
 
 
 @app.get("/v1/messages/{request_id}/status", response_model=schemas.MessageStatusResponse, tags=["messages"])
-async def get_message_status(request_id: UUID, request, db: Session = Depends(get_db)):
+async def get_message_status(request_id: UUID, request: Request, db: Session = Depends(get_db)):
     msg = (
         db.query(models.ChatMessage)
         .filter(
@@ -287,7 +287,7 @@ def health_liveness():
 
 
 @app.get("/v1/health/readiness", response_model=schemas.HealthResponse, tags=["health"])
-async def health_readiness(request, db: Session = Depends(get_db)):
+async def health_readiness(request: Request, db: Session = Depends(get_db)):
     try:
         db.execute(text("SELECT 1"))
         db_ok = "ok"

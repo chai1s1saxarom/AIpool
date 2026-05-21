@@ -97,6 +97,8 @@ services:
     build: ./image-processing-service
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:123@image-db:5432/image_db
+      SYNC_DATABASE_URL: postgresql+psycopg2://postgres:123@image-db:5432/image_db
+      DB_HOST: image-db
       RABBITMQ_URL: amqp://guest:guest@image-rabbitmq:5672/
     depends_on:
       image-db:

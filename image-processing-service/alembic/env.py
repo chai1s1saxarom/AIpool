@@ -13,12 +13,22 @@ from alembic import context
 dotenv_path = Path(__file__).parent.parent / ".env"
 load_dotenv(dotenv_path)
 
-DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "123")
-DB_NAME = os.getenv("DB_NAME", "image_db")
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = os.getenv("DB_PORT", "5432")
-DATABASE_URL = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+def _sync_database_url() -> str:
+    """Alembic требует синхронный драйвер psycopg2."""
+    raw = os.getenv("SYNC_DATABASE_URL") or os.getenv("DATABASE_URL")
+    if raw:
+        return raw.replace("postgresql+asyncpg", "postgresql+psycopg2").replace(
+            "asyncpg", "psycopg2"
+        )
+    db_user = os.getenv("DB_USER", "postgres")
+    db_password = os.getenv("DB_PASSWORD", "123")
+    db_name = os.getenv("DB_NAME", "image_db")
+    db_host = os.getenv("DB_HOST", "localhost")
+    db_port = os.getenv("DB_PORT", "5432")
+    return f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+
+
+DATABASE_URL = _sync_database_url()
 # --- Устанавливаем URL в конфигурацию Alembic ---
 config = context.config
 config.set_main_option("sqlalchemy.url", DATABASE_URL)

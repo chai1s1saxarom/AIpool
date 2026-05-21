@@ -14,6 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import models, schemas
 from app.database import AsyncSessionLocal, get_db
+from app.logging_config import setup_json_logging
+from app.metrics import setup_metrics
+from app.middleware import CorrelationIdMiddleware
+
+setup_json_logging()
 
 RABBIT_QUEUE_NAME = "lab_queue"
 
@@ -133,9 +138,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Image Processing Service",
     description="Сервис генерации и редактирования изображений (async SQLAlchemy + PostgreSQL)",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
+
+app.add_middleware(CorrelationIdMiddleware)
+setup_metrics(app)
 
 
 @app.get("/v1/images/jobs", response_model=schemas.ImageJobListResponse)
@@ -463,6 +471,14 @@ async def get_provider(provider_id: schemas.ProviderId):
             price_per_image=0.03,
         )
     raise HTTPException(status_code=404, detail={"error": "NOT_FOUND"})
+
+
+@app.get("/v1/debug/slow")
+async def debug_slow(delay: float = 2.0):
+    """Медленный эндпоинт для проверки latency p95 в Grafana (лаб. observability)."""
+    delay = min(max(delay, 0.1), 30.0)
+    await asyncio.sleep(delay)
+    return {"status": "ok", "delay_seconds": delay}
 
 
 @app.get("/v1/health/liveness", response_model=schemas.HealthResponse)
